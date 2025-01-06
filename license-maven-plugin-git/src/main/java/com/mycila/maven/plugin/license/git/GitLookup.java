@@ -19,6 +19,7 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffConfig;
+import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -29,23 +30,30 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.MaxCountRevFilter;
+import org.eclipse.jgit.storage.file.FileBasedConfig;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.SystemReader;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -56,262 +64,373 @@ import static java.util.Objects.requireNonNull;
  */
 public class GitLookup implements AutoCloseable {
 
-  public static final TimeZone DEFAULT_ZONE = TimeZone.getTimeZone("GMT");
+    public static final TimeZone DEFAULT_ZONE = TimeZone.getTimeZone("GMT");
 
-  public static final String MAX_COMMITS_LOOKUP_KEY = "license.git.maxCommitsLookup";
-  // keep for compatibility
-  private static final String COPYRIGHT_LAST_YEAR_MAX_COMMITS_LOOKUP_KEY = "license.git.copyrightLastYearMaxCommitsLookup";
-  public static final String COPYRIGHT_LAST_YEAR_SOURCE_KEY = "license.git.copyrightLastYearSource";
-  public static final String COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY = "license.git.copyrightLastYearTimeZone";
-  public static final String COMMITS_TO_IGNORE_KEY = "license.git.commitsToIgnore";
+    public static final String MAX_COMMITS_LOOKUP_KEY = "license.git.maxCommitsLookup";
+    // keep for compatibility
+    private static final String COPYRIGHT_LAST_YEAR_MAX_COMMITS_LOOKUP_KEY = "license.git.copyrightLastYearMaxCommitsLookup";
+    public static final String COPYRIGHT_LAST_YEAR_SOURCE_KEY = "license.git.copyrightLastYearSource";
+    public static final String COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY = "license.git.copyrightLastYearTimeZone";
+    public static final String COMMITS_TO_IGNORE_KEY = "license.git.commitsToIgnore";
 
-  public enum DateSource {
-    AUTHOR, COMMITER
-  }
-
-  private final int checkCommitsCount;
-  private final DateSource dateSource;
-  private final GitPathResolver pathResolver;
-  private final Repository repository;
-  private final TimeZone timeZone;
-  private final boolean shallow;
-  private final Set<ObjectId> commitsToIgnore;
-
-  /**
-   * Lazily initializes #gitLookup assuming that all subsequent calls to this method will be related
-   * to the same git repository.
-   *
-   * @param file  the file to lookup in git
-   * @param props the properties used for license plugin
-   * @return      the git lookup
-   */
-  public static GitLookup create(File file, Map<String, String> props) {
-    final GitLookup.DateSource dateSource = Optional.ofNullable(props.get(COPYRIGHT_LAST_YEAR_SOURCE_KEY))
-        .map(String::trim)
-        .map(String::toUpperCase)
-        .map(GitLookup.DateSource::valueOf)
-        .orElse(GitLookup.DateSource.AUTHOR);
-
-    final int checkCommitsCount = Stream.of(
-            MAX_COMMITS_LOOKUP_KEY,
-            COPYRIGHT_LAST_YEAR_MAX_COMMITS_LOOKUP_KEY) // Backwards compatibility
-        .map(props::get)
-        .filter(Objects::nonNull)
-        .map(String::trim)
-        .map(Integer::parseInt)
-        .findFirst()
-        .orElse(Integer.MAX_VALUE);
-
-    final Set<ObjectId> commitsToIgnore = Stream.of(COMMITS_TO_IGNORE_KEY)
-        .map(props::get)
-        .filter(Objects::nonNull)
-        .flatMap(s -> Stream.of(s.split(",")))
-        .map(String::trim)
-        .filter(s -> !s.isEmpty())
-        .map(ObjectId::fromString)
-        .collect(Collectors.toSet());
-
-    final TimeZone timeZone = Optional.ofNullable(props.get(COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY))
-        .map(String::trim)
-        .map(TimeZone::getTimeZone)
-        .orElse(DEFAULT_ZONE);
-
-    return new GitLookup(file, dateSource, timeZone, checkCommitsCount, commitsToIgnore);
-  }
-
-  /**
-   * Creates a new {@link GitLookup} for a repository that is detected from the supplied {@code
-   * anyFile}.
-   * <p>
-   * Note on time zones:
-   *
-   * @param anyFile           - any path from the working tree of the git repository to consider in
-   *                          all subsequent calls to {@link #getYearOfLastChange(File)}
-   * @param dateSource        where to read the commit dates from - committer date or author date
-   * @param timeZone          the time zone if {@code dateSource} is {@link DateSource#COMMITER};
-   *                          otherwise must be {@code null}.
-   * @param checkCommitsCount the number of historical commits, per file, to check
-   * @param commitsToIgnore   the commits to ignore while inspecting the history for {@code anyFile}
-   */
-  private GitLookup(File anyFile, DateSource dateSource, TimeZone timeZone, int checkCommitsCount, Set<ObjectId> commitsToIgnore) {
-    requireNonNull(anyFile);
-    requireNonNull(dateSource);
-    requireNonNull(timeZone);
-    requireNonNull(commitsToIgnore);
-
-    try {
-      this.repository = new FileRepositoryBuilder().findGitDir(anyFile).build();
-      /* A workaround for  https://bugs.eclipse.org/bugs/show_bug.cgi?id=457961 */
-      // Also contains contents of .git/shallow and can detect shallow repo
-      // the line below reads and caches the entries in the FileObjectDatabase of the repository to
-      // avoid concurrent modifications during RevWalk
-      // Closing the repository will close the FileObjectDatabase.
-      // Here the newReader() is a WindowCursor which delegates the getShallowCommits() to the FileObjectDatabase.
-      try (ObjectReader objectReader = this.repository.getObjectDatabase().newReader()) {
-        this.shallow = !objectReader.getShallowCommits().isEmpty();
-      }
-      this.pathResolver = new GitPathResolver(repository.getWorkTree().getAbsolutePath());
-      this.dateSource = dateSource;
-      this.timeZone = timeZone;
-      this.checkCommitsCount = checkCommitsCount;
-      this.commitsToIgnore = commitsToIgnore;
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
-  }
-
-  /**
-   * Returns the year of the last change of the given {@code file} based on the history of the present git branch. The
-   * year is taken either from the committer date or from the author identity depending on how {@link #dateSource} was
-   * initialized.
-   * <p>
-   * See also the note on time zones in {@link #GitLookup(File, DateSource, TimeZone, int, Set)}.
-   *
-   * @param file for which the year should be retrieved
-   * @return year of last modification of the file
-   * @throws IOException     if unable to read the file
-   * @throws GitAPIException if unable to process the git history
-   */
-  int getYearOfLastChange(File file) throws GitAPIException, IOException {
-    String repoRelativePath = pathResolver.relativize(file);
-
-    if (isFileModifiedOrUnstaged(repoRelativePath)) {
-      return getCurrentYear();
+    public enum DateSource {
+        AUTHOR, COMMITER
     }
 
-    int commitYear = 0;
-    RevWalk walk = getGitRevWalk(repoRelativePath, false);
-    for (RevCommit commit : walk) {
-      if (commitsToIgnore.contains(commit.getId())) {
-        continue;
-      }
-      int y = getYearFromCommit(commit);
-      if (y > commitYear) {
-        commitYear = y;
-      }
-    }
-    walk.dispose();
-    return commitYear;
-  }
+    private final int checkCommitsCount;
+    private final DateSource dateSource;
+    private final GitPathResolver pathResolver;
+    private final Repository repository;
+    private final DiffConfig diffConfig;
+    private final TimeZone timeZone;
+    private final boolean shallow;
+    private final Set<ObjectId> commitsToIgnore;
 
-  /**
-   * Returns the year of creation for the given {@code file} based on the history of the present git branch. The
-   * year is taken either from the committer date or from the author identity depending on how {@link #dateSource} was
-   * initialized.
-   */
-  int getYearOfCreation(File file) throws IOException {
-    String repoRelativePath = pathResolver.relativize(file);
+    /**
+     * Lazily initializes #gitLookup assuming that all subsequent calls to this
+     * method will be related
+     * to the same git repository.
+     *
+     * @param file  the file to lookup in git
+     * @param props the properties used for license plugin
+     * @return the git lookup
+     */
+    public static GitLookup create(File file, Map<String, String> props) {
+        final GitLookup.DateSource dateSource = Optional.ofNullable(props.get(COPYRIGHT_LAST_YEAR_SOURCE_KEY))
+                .map(String::trim)
+                .map(String::toUpperCase)
+                .map(GitLookup.DateSource::valueOf)
+                .orElse(GitLookup.DateSource.AUTHOR);
 
-    int commitYear = 0;
-    RevWalk walk = getGitRevWalk(repoRelativePath, true);
-    Iterator<RevCommit> iterator = walk.iterator();
-    if (iterator.hasNext()) {
-      RevCommit commit = iterator.next();
-      commitYear = getYearFromCommit(commit);
-    }
-    walk.dispose();
+        final int checkCommitsCount = Stream.of(
+                MAX_COMMITS_LOOKUP_KEY,
+                COPYRIGHT_LAST_YEAR_MAX_COMMITS_LOOKUP_KEY) // Backwards compatibility
+                .map(props::get)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .map(Integer::parseInt)
+                .findFirst()
+                .orElse(Integer.MAX_VALUE);
 
-    // If we couldn't find a creation year from Git assume newly created file
-    if (commitYear == 0) {
-      return getCurrentYear();
-    }
+        final Set<ObjectId> commitsToIgnore = Stream.of(COMMITS_TO_IGNORE_KEY)
+                .map(props::get)
+                .filter(Objects::nonNull)
+                .flatMap(s -> Stream.of(s.split(",")))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(ObjectId::fromString)
+                .collect(Collectors.toSet());
 
-    return commitYear;
-  }
+        final TimeZone timeZone = Optional.ofNullable(props.get(COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY))
+                .map(String::trim)
+                .map(TimeZone::getTimeZone)
+                .orElse(DEFAULT_ZONE);
 
-  String getAuthorNameOfCreation(File file) throws IOException {
-    String repoRelativePath = pathResolver.relativize(file);
-    String authorName = "";
-    RevWalk walk = getGitRevWalk(repoRelativePath, true);
-    Iterator<RevCommit> iterator = walk.iterator();
-    if (iterator.hasNext()) {
-      RevCommit commit = iterator.next();
-      authorName = getAuthorNameFromCommit(commit);
-    }
-    walk.dispose();
-    return authorName;
-  }
-
-  String getAuthorEmailOfCreation(File file) throws IOException {
-    String repoRelativePath = pathResolver.relativize(file);
-    String authorEmail = "";
-    RevWalk walk = getGitRevWalk(repoRelativePath, true);
-    Iterator<RevCommit> iterator = walk.iterator();
-    if (iterator.hasNext()) {
-      RevCommit commit = iterator.next();
-      authorEmail = getAuthorEmailFromCommit(commit);
-    }
-    walk.dispose();
-    return authorEmail;
-  }
-
-  boolean isShallowRepository() {
-    return this.shallow;
-  }
-
-  private boolean isFileModifiedOrUnstaged(String repoRelativePath) throws GitAPIException {
-    Status status = null;
-    try (Git git = new Git(repository)) {
-      status = git.status().addPath(repoRelativePath).call();
-    }
-    return !status.isClean();
-  }
-
-  private RevWalk getGitRevWalk(String repoRelativePath, boolean oldestCommitsFirst) throws IOException {
-    DiffConfig diffConfig = repository.getConfig().get(DiffConfig.KEY);
-
-    RevWalk walk = new RevWalk(repository);
-    walk.markStart(walk.parseCommit(repository.resolve(Constants.HEAD)));
-    walk.setTreeFilter(AndTreeFilter.create(Arrays.asList(
-        PathFilter.create(repoRelativePath),
-        FollowFilter.create(repoRelativePath, diffConfig), // Allows us to follow files as they move or are renamed
-        TreeFilter.ANY_DIFF)
-    ));
-    walk.setRevFilter(MaxCountRevFilter.create(checkCommitsCount));
-    walk.setRetainBody(false);
-    if (oldestCommitsFirst) {
-      walk.sort(RevSort.REVERSE);
+        return new GitLookup(file, dateSource, timeZone, checkCommitsCount, commitsToIgnore);
     }
 
-    return walk;
-  }
+    /**
+     * Creates a new {@link GitLookup} for a repository that is detected from the
+     * supplied {@code
+     * anyFile}.
+     * <p>
+     * Note on time zones:
+     *
+     * @param anyFile           - any path from the working tree of the git
+     *                          repository to consider in
+     *                          all subsequent calls to
+     *                          {@link #getYearOfLastChange(File)}
+     * @param dateSource        where to read the commit dates from - committer date
+     *                          or author date
+     * @param timeZone          the time zone if {@code dateSource} is
+     *                          {@link DateSource#COMMITER};
+     *                          otherwise must be {@code null}.
+     * @param checkCommitsCount the number of historical commits, per file, to check
+     * @param commitsToIgnore   the commits to ignore while inspecting the history
+     *                          for {@code anyFile}
+     */
+    private GitLookup(File anyFile, DateSource dateSource, TimeZone timeZone, int checkCommitsCount,
+            Set<ObjectId> commitsToIgnore) {
+        requireNonNull(anyFile);
+        requireNonNull(dateSource);
+        requireNonNull(timeZone);
+        requireNonNull(commitsToIgnore);
 
-  private int getCurrentYear() {
-    return toYear(System.currentTimeMillis(), timeZone);
-  }
+        try {
+            // SystemReader oldSystemReader = SystemReader.getInstance();
+            // SystemReader.setInstance(
+            // new SystemReader.Delegate(oldSystemReader) {
+            // @Override
+            // public FileBasedConfig openJGitConfig(Config parent, FS fs) {
+            // return new FileBasedConfig(parent, null, fs) {
+            // @Override
+            // public void load() {
+            // }
 
-  private int getYearFromCommit(RevCommit commit) {
-    switch (dateSource) {
-      case COMMITER:
-        int epochSeconds = commit.getCommitTime();
-        return toYear(epochSeconds * 1000L, timeZone);
-      case AUTHOR:
+            // @Override
+            // public boolean isOutdated() {
+            // return false;
+            // }
+            // };
+            // }
+
+            // @Override
+            // public FileBasedConfig openUserConfig(Config parent, FS fs) {
+            // return new FileBasedConfig(parent, null, fs) {
+            // @Override
+            // public void load() {
+            // }
+
+            // @Override
+            // public boolean isOutdated() {
+            // return false;
+            // }
+            // };
+            // }
+
+            // @Override
+            // public FileBasedConfig openSystemConfig(Config parent, FS fs) {
+            // return new FileBasedConfig(parent, null, fs) {
+            // @Override
+            // public void load() {
+            // }
+
+            // @Override
+            // public boolean isOutdated() {
+            // return false;
+            // }
+            // };
+            // }
+            // });
+
+            this.repository = new FileRepositoryBuilder().findGitDir(anyFile).build();
+            this.diffConfig = repository.getConfig().get(DiffConfig.KEY);
+
+            /* A workaround for https://bugs.eclipse.org/bugs/show_bug.cgi?id=457961 */
+            // Also contains contents of .git/shallow and can detect shallow repo
+            // the line below reads and caches the entries in the FileObjectDatabase of the
+            // repository to
+            // avoid concurrent modifications during RevWalk
+            // Closing the repository will close the FileObjectDatabase.
+            // Here the newReader() is a WindowCursor which delegates the
+            // getShallowCommits() to the FileObjectDatabase.
+            try (ObjectReader objectReader = this.repository.getObjectDatabase().newReader()) {
+                this.shallow = !objectReader.getShallowCommits().isEmpty();
+            }
+            this.pathResolver = new GitPathResolver(repository.getWorkTree().getAbsolutePath());
+            this.dateSource = dateSource;
+            this.timeZone = timeZone;
+            this.checkCommitsCount = checkCommitsCount;
+            this.commitsToIgnore = commitsToIgnore;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Returns the year of the last change of the given {@code file} based on the
+     * history of the present git branch. The
+     * year is taken either from the committer date or from the author identity
+     * depending on how {@link #dateSource} was
+     * initialized.
+     * <p>
+     * See also the note on time zones in
+     * {@link #GitLookup(File, DateSource, TimeZone, int, Set)}.
+     *
+     * @param file for which the year should be retrieved
+     * @return year of last modification of the file
+     * @throws IOException     if unable to read the file
+     * @throws GitAPIException if unable to process the git history
+     */
+    int getYearOfLastChange(File file) throws GitAPIException, IOException {
+        String repoRelativePath = pathResolver.relativize(file);
+
+        if (isFileModifiedOrUnstaged(repoRelativePath)) {
+            return getCurrentYear();
+        }
+
+        return timed("getYearOfLastChange", () -> {
+            int commitYear = 0;
+            RevWalk walk = getGitRevWalk(repoRelativePath, false);
+            for (RevCommit commit : walk) {
+                if (commitsToIgnore.contains(commit.getId())) {
+                    continue;
+                }
+                int y = getYearFromCommit(commit);
+                if (y > commitYear) {
+                    commitYear = y;
+                }
+                // System.err.println("FW wtf " + commit.getId());
+            }
+            // System.err.println("FW wtf " + file);
+            walk.dispose();
+            return commitYear;
+        });
+    }
+
+    /**
+     * Returns the year of creation for the given {@code file} based on the history
+     * of the present git branch. The
+     * year is taken either from the committer date or from the author identity
+     * depending on how {@link #dateSource} was
+     * initialized.
+     */
+    int getYearOfCreation(File file) throws IOException {
+        String repoRelativePath = pathResolver.relativize(file);
+
+        return timed("getYearOfCreation", () -> {
+            int commitYear = 0;
+            RevWalk walk = getGitRevWalk(repoRelativePath, true);
+            Iterator<RevCommit> iterator = walk.iterator();
+            if (iterator.hasNext()) {
+                // System.err.println("FW wtf1 " + checkCommitsCount);
+                RevCommit commit = iterator.next();
+                commitYear = getYearFromCommit(commit);
+            }
+            walk.dispose();
+
+            // If we couldn't find a creation year from Git assume newly created file
+            if (commitYear == 0) {
+                return getCurrentYear();
+            }
+
+            return commitYear;
+        });
+    }
+
+    String getAuthorNameOfCreation(File file) throws IOException {
+        String repoRelativePath = pathResolver.relativize(file);
+
+        return timed("getAuthorNameOfCreation", () -> {
+            String authorName = "";
+            RevWalk walk = getGitRevWalk(repoRelativePath, true);
+            Iterator<RevCommit> iterator = walk.iterator();
+            if (iterator.hasNext()) {
+                // System.err.println("FW wtf2 " + checkCommitsCount);
+                RevCommit commit = iterator.next();
+                authorName = getAuthorNameFromCommit(commit);
+            }
+            walk.dispose();
+            return authorName;
+        });
+    }
+
+    String getAuthorEmailOfCreation(File file) throws IOException {
+        String repoRelativePath = pathResolver.relativize(file);
+
+        return timed("getAuthorEmailOfCreation", () -> {
+            String authorEmail = "";
+            RevWalk walk = getGitRevWalk(repoRelativePath, true);
+            Iterator<RevCommit> iterator = walk.iterator();
+            if (iterator.hasNext()) {
+                RevCommit commit = iterator.next();
+                authorEmail = getAuthorEmailFromCommit(commit);
+            }
+            walk.dispose();
+            return authorEmail;
+        });
+    }
+
+    boolean isShallowRepository() {
+        return this.shallow;
+    }
+
+    private boolean isFileModifiedOrUnstaged(String repoRelativePath) throws GitAPIException {
+        Status status = null;
+        try (Git git = new Git(repository)) {
+            status = git.status().addPath(repoRelativePath).call();
+        }
+        return !status.isClean();
+    }
+
+    private RevWalk getGitRevWalk(String repoRelativePath, boolean oldestCommitsFirst) throws IOException {
+        DiffConfig diffConfig = repository.getConfig().get(DiffConfig.KEY);
+
+        RevWalk walk = new RevWalk(repository);
+        walk.markStart(walk.parseCommit(repository.resolve(Constants.HEAD)));
+        walk.setTreeFilter(AndTreeFilter.create(Arrays.asList(
+                PathFilter.create(repoRelativePath),
+                FollowFilter.create(repoRelativePath, diffConfig), // Allows us to follow files as they move or are
+                                                                   // renamed
+                TreeFilter.ANY_DIFF)));
+        walk.setRevFilter(MaxCountRevFilter.create(checkCommitsCount));
+        // System.err.println("FW " + checkCommitsCount);
+        walk.setRetainBody(false);
+        if (oldestCommitsFirst) {
+            walk.sort(RevSort.REVERSE);
+        }
+
+        return walk;
+    }
+
+    private int getCurrentYear() {
+        return toYear(System.currentTimeMillis(), timeZone);
+    }
+
+    private int getYearFromCommit(RevCommit commit) {
+        switch (dateSource) {
+            case COMMITER:
+                int epochSeconds = commit.getCommitTime();
+                return toYear(epochSeconds * 1000L, timeZone);
+            case AUTHOR:
+                PersonIdent id = commit.getAuthorIdent();
+                Date date = id.getWhen();
+                return toYear(date.getTime(), id.getTimeZone());
+            default:
+                throw new IllegalStateException("Unexpected " + DateSource.class.getName() + " " + dateSource);
+        }
+    }
+
+    private static int toYear(long epochMilliseconds, TimeZone timeZone) {
+        Calendar result = Calendar.getInstance(timeZone);
+        result.setTimeInMillis(epochMilliseconds);
+        return result.get(Calendar.YEAR);
+    }
+
+    private String getAuthorNameFromCommit(RevCommit commit) {
         PersonIdent id = commit.getAuthorIdent();
-        Date date = id.getWhen();
-        return toYear(date.getTime(), id.getTimeZone());
-      default:
-        throw new IllegalStateException("Unexpected " + DateSource.class.getName() + " " + dateSource);
+        return id.getName();
     }
-  }
 
-  private static int toYear(long epochMilliseconds, TimeZone timeZone) {
-    Calendar result = Calendar.getInstance(timeZone);
-    result.setTimeInMillis(epochMilliseconds);
-    return result.get(Calendar.YEAR);
-  }
+    private String getAuthorEmailFromCommit(RevCommit commit) {
+        PersonIdent id = commit.getAuthorIdent();
+        return id.getEmailAddress();
+    }
 
-  private String getAuthorNameFromCommit(RevCommit commit) {
-    PersonIdent id = commit.getAuthorIdent();
-    return id.getName();
-  }
+    @Override
+    public void close() {
+        repository.close();
+        timedClose();
+    }
 
-  private String getAuthorEmailFromCommit(RevCommit commit) {
-    PersonIdent id = commit.getAuthorIdent();
-    return id.getEmailAddress();
-  }
+    static Map<String, List<Long>> collectTimed = new HashMap<>();
 
-  @Override
-  public void close() {
-    repository.close();
-  }
+    static <T> T timed(String title, Callable<T> doit) throws IOException {
+        long now0 = System.currentTimeMillis();
+        try {
+            return doit.call();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            long now = System.currentTimeMillis();
+            // System.out.println(String.format("FW timed %s: %dms", title, now - now0));
+            collectTimed.merge(title, List.of(now - now0), (a, b) -> {
+                var merged = new ArrayList<Long>(a);
+                merged.addAll(b);
+                return merged;
+            });
+        }
+    }
+
+    static void timedClose() {
+        collectTimed.forEach((title, timed) -> {
+            var total = timed.stream().mapToLong(v -> v).sum();
+            var average = (long) timed.stream().mapToLong(v -> v).average().orElse(-1);
+            System.out.println(String.format("FW timed %s: %d %dms, average %dms", title, timed.size(),
+                    total, average));
+        });
+        collectTimed.clear();
+    }
 }

@@ -27,56 +27,86 @@ import java.util.Map;
 
 /**
  * An implementation of {@link PropertiesProvider} that adds {@value
- * #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} and {@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY} values -
+ * #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} and
+ * {@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY} values -
  * see {@link #adjustProperties(AbstractLicenseMojo, Map, Document)}.
  */
 public class CopyrightAuthorProvider implements PropertiesProvider {
 
-  public static final String COPYRIGHT_CREATION_AUTHOR_NAME_KEY = "license.git.CreationAuthorName";
-  public static final String COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY = "license.git.CreationAuthorEmail";
+    public static final String COPYRIGHT_CREATION_AUTHOR_NAME_KEY = "license.git.CreationAuthorName";
+    public static final String COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY = "license.git.CreationAuthorEmail";
 
-  private GitLookup gitLookup;
+    private GitLookup gitLookup;
 
-  @Override
-  public void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
-    gitLookup = GitLookup.create(mojo.defaultBasedir, currentProperties);
+    @Override
+    public void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
+        gitLookup = GitLookup.create(mojo.defaultBasedir, currentProperties);
 
-    // One-time warning for shallow repo
-    if (mojo.warnIfShallow && gitLookup.isShallowRepository()) {
-      mojo.warn("Shallow git repository detected. Author property values may not be accurate.");
+        // One-time warning for shallow repo
+        if (mojo.warnIfShallow && gitLookup.isShallowRepository()) {
+            mojo.warn("Shallow git repository detected. Author property values may not be accurate.");
+        }
     }
-  }
 
-  @Override
-  public void close() {
-    if (gitLookup != null) {
-      gitLookup.close();
+    @Override
+    public void close() {
+        if (gitLookup != null) {
+            gitLookup.close();
+        }
     }
-  }
 
-  /**
-   * Returns an unmodifiable map containing the two entries {@value #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} and {@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY},
-   * , whose values are set based on inspecting git history.
-   *
-   * <ul>
-   * <li>{@value #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} key stores the author name of the first git commit.
-   * <li>{@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY} key stores the author's email address of the first git commit.
-   * </ul>
-   */
-  @Override
-  public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
-                                              Map<String, String> properties, Document document) {
-    try {
-      Map<String, String> result = new HashMap<>(3);
-      result.put(COPYRIGHT_CREATION_AUTHOR_NAME_KEY,
-          gitLookup.getAuthorNameOfCreation(document.getFile()));
-      result.put(COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY,
-          gitLookup.getAuthorEmailOfCreation(document.getFile()));
-      return Collections.unmodifiableMap(result);
-    } catch (IOException e) {
-      throw new UncheckedIOException(
-          "CopyrightAuthorProvider error on file: " + document.getFile().getAbsolutePath() + ": "
-              + e.getMessage(), e);
+    /**
+     * Returns an unmodifiable map containing the two entries
+     * {@value #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} and
+     * {@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY},
+     * , whose values are set based on inspecting git history.
+     *
+     * <ul>
+     * <li>{@value #COPYRIGHT_CREATION_AUTHOR_NAME_KEY} key stores the author name
+     * of the first git commit.
+     * <li>{@value #COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY} key stores the author's
+     * email address of the first git commit.
+     * </ul>
+     */
+    @Override
+    public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
+            Map<String, String> properties, Document document) {
+        // try {
+        // Map<String, String> result = new HashMap<>(3);
+        // result.put(COPYRIGHT_CREATION_AUTHOR_NAME_KEY,
+        // gitLookup.getAuthorNameOfCreation(document.getFile()));
+        // result.put(COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY,
+        // gitLookup.getAuthorEmailOfCreation(document.getFile()));
+        // return Collections.unmodifiableMap(result);
+        // } catch (IOException e) {
+        // throw new UncheckedIOException(
+        // "CopyrightAuthorProvider error on file: " +
+        // document.getFile().getAbsolutePath() + ": "
+        // + e.getMessage(), e);
+        // }
+
+        return new LazyMap<String, String>(Map.of(
+                COPYRIGHT_CREATION_AUTHOR_NAME_KEY, () -> {
+                    try {
+                        return gitLookup.getAuthorNameOfCreation(document.getFile());
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(
+                                "CopyrightAuthorProvider error on file: " +
+                                        document.getFile().getAbsolutePath() + ": "
+                                        + e.getMessage(),
+                                e);
+                    }
+                },
+                COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY, () -> {
+                    try {
+                        return gitLookup.getAuthorEmailOfCreation(document.getFile());
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(
+                                "CopyrightAuthorProvider error on file: " +
+                                        document.getFile().getAbsolutePath() + ": "
+                                        + e.getMessage(),
+                                e);
+                    }
+                }));
     }
-  }
 }

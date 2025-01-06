@@ -15,6 +15,9 @@
  */
 package com.mycila.maven.plugin.license.git;
 
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.collect.MapMaker;
 import com.mycila.maven.plugin.license.AbstractLicenseMojo;
 import com.mycila.maven.plugin.license.PropertiesProvider;
 import com.mycila.maven.plugin.license.document.Document;
@@ -24,102 +27,217 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.function.Function;
+
+import javax.management.RuntimeErrorException;
 
 /**
- * An implementation of {@link PropertiesProvider} that adds {@value #COPYRIGHT_LAST_YEAR_KEY} and
- * {@value #COPYRIGHT_YEARS_KEY} values - see {@link #adjustProperties(AbstractLicenseMojo, Map,
+ * An implementation of {@link PropertiesProvider} that adds
+ * {@value #COPYRIGHT_LAST_YEAR_KEY} and
+ * {@value #COPYRIGHT_YEARS_KEY} values - see
+ * {@link #adjustProperties(AbstractLicenseMojo, Map,
  * Document)}.
  */
 public class CopyrightRangeProvider implements PropertiesProvider {
 
-  public static final String COPYRIGHT_LAST_YEAR_KEY = "license.git.copyrightLastYear";
-  public static final String COPYRIGHT_CREATION_YEAR_KEY = "license.git.copyrightCreationYear";
-  public static final String COPYRIGHT_EXISTENCE_YEARS_KEY = "license.git.copyrightExistenceYears";
-  public static final String COPYRIGHT_YEARS_KEY = "license.git.copyrightYears";
-  public static final String INCEPTION_YEAR_KEY = "project.inceptionYear";
+    public static final String COPYRIGHT_LAST_YEAR_KEY = "license.git.copyrightLastYear";
+    public static final String COPYRIGHT_CREATION_YEAR_KEY = "license.git.copyrightCreationYear";
+    public static final String COPYRIGHT_EXISTENCE_YEARS_KEY = "license.git.copyrightExistenceYears";
+    public static final String COPYRIGHT_YEARS_KEY = "license.git.copyrightYears";
+    public static final String INCEPTION_YEAR_KEY = "project.inceptionYear";
 
-  private GitLookup gitLookup;
+    private GitLookup gitLookup;
 
-  @Override
-  public void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
-    gitLookup = GitLookup.create(mojo.defaultBasedir, currentProperties);
+    @Override
+    public void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
+        gitLookup = GitLookup.create(mojo.defaultBasedir, currentProperties);
 
-    // One-time warning for shallow repo
-    if (mojo.warnIfShallow && gitLookup.isShallowRepository()) {
-      mojo.warn("Shallow git repository detected. Year property values may not be accurate.");
+        // One-time warning for shallow repo
+        if (mojo.warnIfShallow && gitLookup.isShallowRepository()) {
+            mojo.warn("Shallow git repository detected. Year property values may not be accurate.");
+        }
     }
-  }
 
-  @Override
-  public void close() {
-    if (gitLookup != null) {
-      gitLookup.close();
+    @Override
+    public void close() {
+        if (gitLookup != null) {
+            gitLookup.close();
+        }
     }
-  }
 
-  /**
-   * Returns an unmodifiable map containing the following entries, whose values are set based on inspecting git history.
-   *
-   * <ul>
-   * <li>{@value #COPYRIGHT_LAST_YEAR_KEY} key stores the year from the committer date of the last git commit that has
-   * modified the supplied {@code document}.</li>
-   * <li>{@value #COPYRIGHT_YEARS_KEY} key stores the range from {@value #INCEPTION_YEAR_KEY} value to
-   * {@value #COPYRIGHT_LAST_YEAR_KEY} value. If both values a equal, only the {@value #INCEPTION_YEAR_KEY} value is
-   * returned; otherwise, the two values are combined using dash, so that the result is e.g. {@code "2000-2010"}.</li>
-   * <li>{@value #COPYRIGHT_CREATION_YEAR_KEY} key stores the year from the committer date of the first git commit for
-   * the supplied {@code document}.</li>
-   * <li>{@value #COPYRIGHT_EXISTENCE_YEARS_KEY} key stores the range from {@value #COPYRIGHT_CREATION_YEAR_KEY} value to
-   * {@value #COPYRIGHT_LAST_YEAR_KEY} value.  If both values are equal only the {@value #COPYRIGHT_CREATION_YEAR_KEY} is returned;
-   * otherwise, the two values are combined using dash, so that the result is e.g. {@code "2005-2010"}.</li>
-   * </ul>
-   * The {@value #INCEPTION_YEAR_KEY} value is read from the supplied properties and it must available. Otherwise a
-   * {@link RuntimeException} is thrown.
-   */
-  @Override
-  public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
-                                              Map<String, String> properties, Document document) {
-    String inceptionYear = properties.get(INCEPTION_YEAR_KEY);
-    if (inceptionYear == null) {
-      throw new RuntimeException("'" + INCEPTION_YEAR_KEY + "' must have a value for file "
-          + document.getFile().getAbsolutePath());
+    /**
+     * Returns an unmodifiable map containing the following entries, whose values
+     * are set based on inspecting git history.
+     *
+     * <ul>
+     * <li>{@value #COPYRIGHT_LAST_YEAR_KEY} key stores the year from the committer
+     * date of the last git commit that has
+     * modified the supplied {@code document}.</li>
+     * <li>{@value #COPYRIGHT_YEARS_KEY} key stores the range from
+     * {@value #INCEPTION_YEAR_KEY} value to
+     * {@value #COPYRIGHT_LAST_YEAR_KEY} value. If both values a equal, only the
+     * {@value #INCEPTION_YEAR_KEY} value is
+     * returned; otherwise, the two values are combined using dash, so that the
+     * result is e.g. {@code "2000-2010"}.</li>
+     * <li>{@value #COPYRIGHT_CREATION_YEAR_KEY} key stores the year from the
+     * committer date of the first git commit for
+     * the supplied {@code document}.</li>
+     * <li>{@value #COPYRIGHT_EXISTENCE_YEARS_KEY} key stores the range from
+     * {@value #COPYRIGHT_CREATION_YEAR_KEY} value to
+     * {@value #COPYRIGHT_LAST_YEAR_KEY} value. If both values are equal only the
+     * {@value #COPYRIGHT_CREATION_YEAR_KEY} is returned;
+     * otherwise, the two values are combined using dash, so that the result is e.g.
+     * {@code "2005-2010"}.</li>
+     * </ul>
+     * The {@value #INCEPTION_YEAR_KEY} value is read from the supplied properties
+     * and it must available. Otherwise a
+     * {@link RuntimeException} is thrown.
+     */
+    @Override
+    public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
+            Map<String, String> properties, Document document) {
+        String inceptionYear = properties.get(INCEPTION_YEAR_KEY);
+        if (inceptionYear == null) {
+            throw new RuntimeException("'" + INCEPTION_YEAR_KEY + "' must have a value for file "
+                    + document.getFile().getAbsolutePath());
+        }
+        final int inceptionYearInt;
+        try {
+            inceptionYearInt = Integer.parseInt(inceptionYear);
+        } catch (NumberFormatException e1) {
+            throw new RuntimeException(
+                    "'" + INCEPTION_YEAR_KEY + "' must be an integer ; found = " + inceptionYear + " file: "
+                            + document.getFile().getAbsolutePath());
+        }
+        // try {
+        // Map<String, String> result = new HashMap<>(4);
+
+        // int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
+        // result.put(COPYRIGHT_LAST_YEAR_KEY, Integer.toString(copyrightEnd));
+        // final String copyrightYears;
+        // if (inceptionYearInt >= copyrightEnd) {
+        // copyrightYears = inceptionYear;
+        // } else {
+        // copyrightYears = inceptionYear + "-" + copyrightEnd;
+        // }
+        // result.put(COPYRIGHT_YEARS_KEY, copyrightYears);
+
+        // int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
+        // result.put(COPYRIGHT_CREATION_YEAR_KEY, Integer.toString(copyrightStart));
+
+        // final String copyrightExistenceYears;
+        // if (copyrightStart >= copyrightEnd) {
+        // copyrightExistenceYears = Integer.toString(copyrightStart);
+        // } else {
+        // copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
+        // }
+        // result.put(COPYRIGHT_EXISTENCE_YEARS_KEY, copyrightExistenceYears);
+
+        var cache = new HashMap<String, String>();
+
+        // Map<String, String> lazyMap =
+        // CacheBuilder.newBuilder().build(CacheLoader.from((String k) -> {
+        // var result = (String) null;
+        // if (COPYRIGHT_LAST_YEAR_KEY.equals(k)) {
+        // try {
+        // int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
+        // result = Integer.toString(copyrightEnd);
+        // } catch (IOException | GitAPIException e) {
+        // throw new RuntimeException(
+        // "CopyrightRangeProvider error on file: " +
+        // document.getFile().getAbsolutePath() + ": "
+        // + e.getMessage(),
+        // e);
+        // }
+        // } else if (COPYRIGHT_YEARS_KEY.equals(k)) {
+        // int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_YEARS_KEY));
+        // final String copyrightYears;
+        // if (inceptionYearInt >= copyrightEnd) {
+        // copyrightYears = inceptionYear;
+        // } else {
+        // copyrightYears = inceptionYear + "-" + copyrightEnd;
+        // }
+        // result = copyrightYears;
+        // } else if (COPYRIGHT_CREATION_YEAR_KEY.equals(k)) {
+        // try {
+        // int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
+        // result = Integer.toString(copyrightStart);
+        // } catch (IOException e) {
+        // throw new RuntimeException(
+        // "CopyrightRangeProvider error on file: " +
+        // document.getFile().getAbsolutePath() + ": "
+        // + e.getMessage(),
+        // e);
+        // }
+        // } else if (COPYRIGHT_EXISTENCE_YEARS_KEY.equals(k)) {
+        // int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_LAST_YEAR_KEY));
+        // int copyrightStart =
+        // Integer.parseInt(cache.get(COPYRIGHT_CREATION_YEAR_KEY));
+        // final String copyrightExistenceYears;
+        // if (copyrightStart >= copyrightEnd) {
+        // copyrightExistenceYears = Integer.toString(copyrightStart);
+        // } else {
+        // copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
+        // }
+        // result = copyrightExistenceYears;
+        // }
+        // cache.put(k, result);
+        // return result;
+        // })).asMap();
+
+        // return Collections.unmodifiableMap(result);
+        // return lazyMap;
+        return new LazyMap<String, String>(Map.of(
+                COPYRIGHT_LAST_YEAR_KEY, () -> {
+                    try {
+                        int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
+                        return Integer.toString(copyrightEnd);
+                    } catch (IOException | GitAPIException e) {
+                        throw new RuntimeException(
+                                "CopyrightRangeProvider error on file: " +
+                                        document.getFile().getAbsolutePath() + ": "
+                                        + e.getMessage(),
+                                e);
+                    }
+                }, COPYRIGHT_YEARS_KEY, () -> {
+                    int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_YEARS_KEY));
+                    final String copyrightYears;
+                    if (inceptionYearInt >= copyrightEnd) {
+                        copyrightYears = inceptionYear;
+                    } else {
+                        copyrightYears = inceptionYear + "-" + copyrightEnd;
+                    }
+                    return copyrightYears;
+                }, COPYRIGHT_CREATION_YEAR_KEY, () -> {
+                    try {
+                        int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
+                        return Integer.toString(copyrightStart);
+                    } catch (IOException e) {
+                        throw new RuntimeException(
+                                "CopyrightRangeProvider error on file: " +
+                                        document.getFile().getAbsolutePath() + ": "
+                                        + e.getMessage(),
+                                e);
+                    }
+                }, COPYRIGHT_EXISTENCE_YEARS_KEY, () -> {
+                    int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_LAST_YEAR_KEY));
+                    int copyrightStart = Integer.parseInt(cache.get(COPYRIGHT_CREATION_YEAR_KEY));
+                    final String copyrightExistenceYears;
+                    if (copyrightStart >= copyrightEnd) {
+                        copyrightExistenceYears = Integer.toString(copyrightStart);
+                    } else {
+                        copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
+                    }
+                    return copyrightExistenceYears;
+                }));
+
+        // } catch (IOException | GitAPIException e) {
+        // throw new RuntimeException(
+        // "CopyrightRangeProvider error on file: " +
+        // document.getFile().getAbsolutePath() + ": "
+        // + e.getMessage(),
+        // e);
+        // }
     }
-    final int inceptionYearInt;
-    try {
-      inceptionYearInt = Integer.parseInt(inceptionYear);
-    } catch (NumberFormatException e1) {
-      throw new RuntimeException(
-          "'" + INCEPTION_YEAR_KEY + "' must be an integer ; found = " + inceptionYear + " file: "
-              + document.getFile().getAbsolutePath());
-    }
-    try {
-      Map<String, String> result = new HashMap<>(4);
-
-      int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
-      result.put(COPYRIGHT_LAST_YEAR_KEY, Integer.toString(copyrightEnd));
-      final String copyrightYears;
-      if (inceptionYearInt >= copyrightEnd) {
-        copyrightYears = inceptionYear;
-      } else {
-        copyrightYears = inceptionYear + "-" + copyrightEnd;
-      }
-      result.put(COPYRIGHT_YEARS_KEY, copyrightYears);
-
-      int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
-      result.put(COPYRIGHT_CREATION_YEAR_KEY, Integer.toString(copyrightStart));
-
-      final String copyrightExistenceYears;
-      if (copyrightStart >= copyrightEnd) {
-        copyrightExistenceYears = Integer.toString(copyrightStart);
-      } else {
-        copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
-      }
-      result.put(COPYRIGHT_EXISTENCE_YEARS_KEY, copyrightExistenceYears);
-
-      return Collections.unmodifiableMap(result);
-    } catch (IOException | GitAPIException e) {
-      throw new RuntimeException(
-          "CopyrightRangeProvider error on file: " + document.getFile().getAbsolutePath() + ": "
-              + e.getMessage(), e);
-    }
-  }
 }
