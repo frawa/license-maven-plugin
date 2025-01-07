@@ -19,23 +19,38 @@ import com.mycila.maven.plugin.license.document.Document;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  */
 public interface PropertiesProvider extends AutoCloseable {
 
-  default void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
-      // Do nothing on default
-  }
+    default void init(AbstractLicenseMojo mojo, Map<String, String> currentProperties) {
+        // Do nothing on default
+    }
 
-  default Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
-                                               Map<String, String> currentProperties, Document document) {
-    // Return empty collection on default
-    return Collections.emptyMap();
-  }
+    default Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
+            Map<String, String> currentProperties, Document document) {
+        // Return empty collection on default
+        return Collections.emptyMap();
+    }
 
-  @Override
-  default void close() {
-      // Do nothing on default
-  }
+    default Map<String, Supplier<String>> adjustLazyProperties(AbstractLicenseMojo mojo,
+            Map<String, String> currentProperties, Document document) {
+        return adjustProperties(mojo, null, document)
+                .entrySet().stream()
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> () -> e.getValue(),
+                        (a, b) -> {
+                            throw new UnsupportedOperationException();
+                        }));
+    }
+
+    @Override
+    default void close() {
+        // Do nothing on default
+    }
 }

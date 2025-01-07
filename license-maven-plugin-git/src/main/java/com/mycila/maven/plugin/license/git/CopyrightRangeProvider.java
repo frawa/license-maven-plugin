@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import javax.management.RuntimeErrorException;
 
@@ -95,7 +96,7 @@ public class CopyrightRangeProvider implements PropertiesProvider {
      * {@link RuntimeException} is thrown.
      */
     @Override
-    public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
+    public Map<String, Supplier<String>> adjustLazyProperties(AbstractLicenseMojo mojo,
             Map<String, String> properties, Document document) {
         String inceptionYear = properties.get(INCEPTION_YEAR_KEY);
         if (inceptionYear == null) {
@@ -110,97 +111,25 @@ public class CopyrightRangeProvider implements PropertiesProvider {
                     "'" + INCEPTION_YEAR_KEY + "' must be an integer ; found = " + inceptionYear + " file: "
                             + document.getFile().getAbsolutePath());
         }
-        // try {
-        // Map<String, String> result = new HashMap<>(4);
-
-        // int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
-        // result.put(COPYRIGHT_LAST_YEAR_KEY, Integer.toString(copyrightEnd));
-        // final String copyrightYears;
-        // if (inceptionYearInt >= copyrightEnd) {
-        // copyrightYears = inceptionYear;
-        // } else {
-        // copyrightYears = inceptionYear + "-" + copyrightEnd;
-        // }
-        // result.put(COPYRIGHT_YEARS_KEY, copyrightYears);
-
-        // int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
-        // result.put(COPYRIGHT_CREATION_YEAR_KEY, Integer.toString(copyrightStart));
-
-        // final String copyrightExistenceYears;
-        // if (copyrightStart >= copyrightEnd) {
-        // copyrightExistenceYears = Integer.toString(copyrightStart);
-        // } else {
-        // copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
-        // }
-        // result.put(COPYRIGHT_EXISTENCE_YEARS_KEY, copyrightExistenceYears);
 
         var cache = new HashMap<String, String>();
 
-        // Map<String, String> lazyMap =
-        // CacheBuilder.newBuilder().build(CacheLoader.from((String k) -> {
-        // var result = (String) null;
-        // if (COPYRIGHT_LAST_YEAR_KEY.equals(k)) {
-        // try {
-        // int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
-        // result = Integer.toString(copyrightEnd);
-        // } catch (IOException | GitAPIException e) {
-        // throw new RuntimeException(
-        // "CopyrightRangeProvider error on file: " +
-        // document.getFile().getAbsolutePath() + ": "
-        // + e.getMessage(),
-        // e);
-        // }
-        // } else if (COPYRIGHT_YEARS_KEY.equals(k)) {
-        // int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_YEARS_KEY));
-        // final String copyrightYears;
-        // if (inceptionYearInt >= copyrightEnd) {
-        // copyrightYears = inceptionYear;
-        // } else {
-        // copyrightYears = inceptionYear + "-" + copyrightEnd;
-        // }
-        // result = copyrightYears;
-        // } else if (COPYRIGHT_CREATION_YEAR_KEY.equals(k)) {
-        // try {
-        // int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
-        // result = Integer.toString(copyrightStart);
-        // } catch (IOException e) {
-        // throw new RuntimeException(
-        // "CopyrightRangeProvider error on file: " +
-        // document.getFile().getAbsolutePath() + ": "
-        // + e.getMessage(),
-        // e);
-        // }
-        // } else if (COPYRIGHT_EXISTENCE_YEARS_KEY.equals(k)) {
-        // int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_LAST_YEAR_KEY));
-        // int copyrightStart =
-        // Integer.parseInt(cache.get(COPYRIGHT_CREATION_YEAR_KEY));
-        // final String copyrightExistenceYears;
-        // if (copyrightStart >= copyrightEnd) {
-        // copyrightExistenceYears = Integer.toString(copyrightStart);
-        // } else {
-        // copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
-        // }
-        // result = copyrightExistenceYears;
-        // }
-        // cache.put(k, result);
-        // return result;
-        // })).asMap();
-
-        // return Collections.unmodifiableMap(result);
-        // return lazyMap;
-        return new LazyMap<String, String>(Map.of(
+        return Map.of(
                 COPYRIGHT_LAST_YEAR_KEY, () -> {
-                    try {
-                        int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
-                        return Integer.toString(copyrightEnd);
-                    } catch (IOException | GitAPIException e) {
-                        throw new RuntimeException(
-                                "CopyrightRangeProvider error on file: " +
-                                        document.getFile().getAbsolutePath() + ": "
-                                        + e.getMessage(),
-                                e);
-                    }
-                }, COPYRIGHT_YEARS_KEY, () -> {
+                    return cache.computeIfAbsent(COPYRIGHT_LAST_YEAR_KEY, (k) -> {
+                        try {
+                            int copyrightEnd = gitLookup.getYearOfLastChange(document.getFile());
+                            return Integer.toString(copyrightEnd);
+                        } catch (IOException | GitAPIException e) {
+                            throw new RuntimeException(
+                                    "CopyrightRangeProvider error on file: " +
+                                            document.getFile().getAbsolutePath() + ": "
+                                            + e.getMessage(),
+                                    e);
+                        }
+                    });
+                },
+                COPYRIGHT_YEARS_KEY, () -> {
                     int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_YEARS_KEY));
                     final String copyrightYears;
                     if (inceptionYearInt >= copyrightEnd) {
@@ -209,18 +138,22 @@ public class CopyrightRangeProvider implements PropertiesProvider {
                         copyrightYears = inceptionYear + "-" + copyrightEnd;
                     }
                     return copyrightYears;
-                }, COPYRIGHT_CREATION_YEAR_KEY, () -> {
-                    try {
-                        int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
-                        return Integer.toString(copyrightStart);
-                    } catch (IOException e) {
-                        throw new RuntimeException(
-                                "CopyrightRangeProvider error on file: " +
-                                        document.getFile().getAbsolutePath() + ": "
-                                        + e.getMessage(),
-                                e);
-                    }
-                }, COPYRIGHT_EXISTENCE_YEARS_KEY, () -> {
+                },
+                COPYRIGHT_CREATION_YEAR_KEY, () -> {
+                    return cache.computeIfAbsent(COPYRIGHT_CREATION_YEAR_KEY, (k) -> {
+                        try {
+                            int copyrightStart = gitLookup.getYearOfCreation(document.getFile());
+                            return Integer.toString(copyrightStart);
+                        } catch (IOException e) {
+                            throw new RuntimeException(
+                                    "CopyrightRangeProvider error on file: " +
+                                            document.getFile().getAbsolutePath() + ": "
+                                            + e.getMessage(),
+                                    e);
+                        }
+                    });
+                },
+                COPYRIGHT_EXISTENCE_YEARS_KEY, () -> {
                     int copyrightEnd = Integer.parseInt(cache.get(COPYRIGHT_LAST_YEAR_KEY));
                     int copyrightStart = Integer.parseInt(cache.get(COPYRIGHT_CREATION_YEAR_KEY));
                     final String copyrightExistenceYears;
@@ -230,14 +163,6 @@ public class CopyrightRangeProvider implements PropertiesProvider {
                         copyrightExistenceYears = copyrightStart + "-" + copyrightEnd;
                     }
                     return copyrightExistenceYears;
-                }));
-
-        // } catch (IOException | GitAPIException e) {
-        // throw new RuntimeException(
-        // "CopyrightRangeProvider error on file: " +
-        // document.getFile().getAbsolutePath() + ": "
-        // + e.getMessage(),
-        // e);
-        // }
+                });
     }
 }

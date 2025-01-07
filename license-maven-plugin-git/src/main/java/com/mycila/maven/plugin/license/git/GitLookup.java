@@ -73,6 +73,8 @@ public class GitLookup implements AutoCloseable {
     public static final String COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY = "license.git.copyrightLastYearTimeZone";
     public static final String COMMITS_TO_IGNORE_KEY = "license.git.commitsToIgnore";
 
+    private static final boolean DEBUG = false;
+
     public enum DateSource {
         AUTHOR, COMMITER
     }
@@ -81,7 +83,6 @@ public class GitLookup implements AutoCloseable {
     private final DateSource dateSource;
     private final GitPathResolver pathResolver;
     private final Repository repository;
-    private final DiffConfig diffConfig;
     private final TimeZone timeZone;
     private final boolean shallow;
     private final Set<ObjectId> commitsToIgnore;
@@ -157,54 +158,7 @@ public class GitLookup implements AutoCloseable {
         requireNonNull(commitsToIgnore);
 
         try {
-            // SystemReader oldSystemReader = SystemReader.getInstance();
-            // SystemReader.setInstance(
-            // new SystemReader.Delegate(oldSystemReader) {
-            // @Override
-            // public FileBasedConfig openJGitConfig(Config parent, FS fs) {
-            // return new FileBasedConfig(parent, null, fs) {
-            // @Override
-            // public void load() {
-            // }
-
-            // @Override
-            // public boolean isOutdated() {
-            // return false;
-            // }
-            // };
-            // }
-
-            // @Override
-            // public FileBasedConfig openUserConfig(Config parent, FS fs) {
-            // return new FileBasedConfig(parent, null, fs) {
-            // @Override
-            // public void load() {
-            // }
-
-            // @Override
-            // public boolean isOutdated() {
-            // return false;
-            // }
-            // };
-            // }
-
-            // @Override
-            // public FileBasedConfig openSystemConfig(Config parent, FS fs) {
-            // return new FileBasedConfig(parent, null, fs) {
-            // @Override
-            // public void load() {
-            // }
-
-            // @Override
-            // public boolean isOutdated() {
-            // return false;
-            // }
-            // };
-            // }
-            // });
-
             this.repository = new FileRepositoryBuilder().findGitDir(anyFile).build();
-            this.diffConfig = repository.getConfig().get(DiffConfig.KEY);
 
             /* A workaround for https://bugs.eclipse.org/bugs/show_bug.cgi?id=457961 */
             // Also contains contents of .git/shallow and can detect shallow repo
@@ -260,9 +214,7 @@ public class GitLookup implements AutoCloseable {
                 if (y > commitYear) {
                     commitYear = y;
                 }
-                // System.err.println("FW wtf " + commit.getId());
             }
-            // System.err.println("FW wtf " + file);
             walk.dispose();
             return commitYear;
         });
@@ -283,7 +235,6 @@ public class GitLookup implements AutoCloseable {
             RevWalk walk = getGitRevWalk(repoRelativePath, true);
             Iterator<RevCommit> iterator = walk.iterator();
             if (iterator.hasNext()) {
-                // System.err.println("FW wtf1 " + checkCommitsCount);
                 RevCommit commit = iterator.next();
                 commitYear = getYearFromCommit(commit);
             }
@@ -306,7 +257,6 @@ public class GitLookup implements AutoCloseable {
             RevWalk walk = getGitRevWalk(repoRelativePath, true);
             Iterator<RevCommit> iterator = walk.iterator();
             if (iterator.hasNext()) {
-                // System.err.println("FW wtf2 " + checkCommitsCount);
                 RevCommit commit = iterator.next();
                 authorName = getAuthorNameFromCommit(commit);
             }
@@ -354,7 +304,6 @@ public class GitLookup implements AutoCloseable {
                                                                    // renamed
                 TreeFilter.ANY_DIFF)));
         walk.setRevFilter(MaxCountRevFilter.create(checkCommitsCount));
-        // System.err.println("FW " + checkCommitsCount);
         walk.setRetainBody(false);
         if (oldestCommitsFirst) {
             walk.sort(RevSort.REVERSE);
@@ -406,6 +355,16 @@ public class GitLookup implements AutoCloseable {
     static Map<String, List<Long>> collectTimed = new HashMap<>();
 
     static <T> T timed(String title, Callable<T> doit) throws IOException {
+        if (!DEBUG) {
+            try {
+                return doit.call();
+            } catch (IOException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+
         long now0 = System.currentTimeMillis();
         try {
             return doit.call();
@@ -415,7 +374,6 @@ public class GitLookup implements AutoCloseable {
             throw new RuntimeException(e);
         } finally {
             long now = System.currentTimeMillis();
-            // System.out.println(String.format("FW timed %s: %dms", title, now - now0));
             collectTimed.merge(title, List.of(now - now0), (a, b) -> {
                 var merged = new ArrayList<Long>(a);
                 merged.addAll(b);
@@ -428,7 +386,7 @@ public class GitLookup implements AutoCloseable {
         collectTimed.forEach((title, timed) -> {
             var total = timed.stream().mapToLong(v -> v).sum();
             var average = (long) timed.stream().mapToLong(v -> v).average().orElse(-1);
-            System.out.println(String.format("FW timed %s: %d %dms, average %dms", title, timed.size(),
+            System.out.println(String.format("timed %s: %d %dms, average %dms", title, timed.size(),
                     total, average));
         });
         collectTimed.clear();

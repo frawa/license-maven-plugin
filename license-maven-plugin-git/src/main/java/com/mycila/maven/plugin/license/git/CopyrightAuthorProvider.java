@@ -24,6 +24,7 @@ import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * An implementation of {@link PropertiesProvider} that adds {@value
@@ -69,23 +70,10 @@ public class CopyrightAuthorProvider implements PropertiesProvider {
      * </ul>
      */
     @Override
-    public Map<String, String> adjustProperties(AbstractLicenseMojo mojo,
+    public Map<String, Supplier<String>> adjustLazyProperties(AbstractLicenseMojo mojo,
             Map<String, String> properties, Document document) {
-        // try {
-        // Map<String, String> result = new HashMap<>(3);
-        // result.put(COPYRIGHT_CREATION_AUTHOR_NAME_KEY,
-        // gitLookup.getAuthorNameOfCreation(document.getFile()));
-        // result.put(COPYRIGHT_CREATION_AUTHOR_EMAIL_KEY,
-        // gitLookup.getAuthorEmailOfCreation(document.getFile()));
-        // return Collections.unmodifiableMap(result);
-        // } catch (IOException e) {
-        // throw new UncheckedIOException(
-        // "CopyrightAuthorProvider error on file: " +
-        // document.getFile().getAbsolutePath() + ": "
-        // + e.getMessage(), e);
-        // }
 
-        return new LazyMap<String, String>(Map.of(
+        return Map.of(
                 COPYRIGHT_CREATION_AUTHOR_NAME_KEY, () -> {
                     try {
                         return gitLookup.getAuthorNameOfCreation(document.getFile());
@@ -107,6 +95,6 @@ public class CopyrightAuthorProvider implements PropertiesProvider {
                                         + e.getMessage(),
                                 e);
                     }
-                }));
+                });
     }
 }

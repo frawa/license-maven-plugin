@@ -70,6 +70,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -658,23 +659,22 @@ public abstract class AbstractLicenseMojo extends AbstractMojo {
 
                 Map<String, String> readOnly = Collections.unmodifiableMap(perDoc);
 
+                Map<String, Supplier<String>> perDocAdjustments = new LinkedHashMap<>();
                 for (final PropertiesProvider provider : propertiesProviders) {
                     try {
-                        final Map<String, String> adjustments = provider.adjustProperties(
+                        final Map<String, Supplier<String>> adjustments = provider.adjustLazyProperties(
                                 AbstractLicenseMojo.this, readOnly, document);
                         if (getLog().isDebugEnabled()) {
                             getLog().debug("provider: " + provider.getClass() + " adjusted these properties:\n"
                                     + adjustments);
                         }
-                        // for (Map.Entry<String, String> entry : adjustments.entrySet()) {
-                        // if (entry.getValue() != null) {
-                        // perDoc.put(entry.getKey(), entry.getValue());
-                        // } else {
-                        // perDoc.remove(entry.getKey());
-                        // }
-                        // }
-                        // adjustments.putAll(perDoc);
-                        perDoc = new AdjustedMap<>(perDoc, adjustments);
+                        for (Map.Entry<String, Supplier<String>> entry : adjustments.entrySet()) {
+                            if (entry.getValue() != null) {
+                                perDocAdjustments.put(entry.getKey(), entry.getValue());
+                            } else {
+                                perDocAdjustments.remove(entry.getKey());
+                            }
+                        }
                     } catch (Exception e) {
                         if (getLog().isWarnEnabled()) {
                             getLog().warn("failure occurred while calling " + provider.getClass(), e);
@@ -687,7 +687,7 @@ public abstract class AbstractLicenseMojo extends AbstractMojo {
                             .map(Objects::toString).collect(Collectors.joining("\n - ")));
                 }
 
-                return perDoc;
+                return new AdjustedMap<>(perDoc, perDocAdjustments);
             };
 
             final DocumentFactory documentFactory = new DocumentFactory(
@@ -954,18 +954,22 @@ public abstract class AbstractLicenseMojo extends AbstractMojo {
 
     static class AdjustedMap<K, V> extends HashMap<K, V> {
         private Map<K, V> base;
-        private Map<K, V> adjusted;
+        private Map<K, Supplier<V>> adjustments;
 
-        AdjustedMap(Map<K, V> base, Map<K, V> adjusted) {
+        AdjustedMap(Map<K, V> base, Map<K, Supplier<V>> adjustments) {
             this.base = base;
-            this.adjusted = adjusted;
+            this.adjustments = adjustments;
         }
 
+        @SuppressWarnings("unchecked")
         @Override
         public V get(Object key) {
-            return adjusted.containsKey(key)
-                    ? adjusted.get(key)
-                    : base.get(key);
+            return super.compute(
+                    (K) key,
+                    (K k, V v) -> v != null ? v
+                            : adjustments.containsKey(key)
+                                    ? adjustments.get(key).get()
+                                    : base.get(key));
         }
     }
 }
