@@ -19,7 +19,6 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffConfig;
-import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -30,30 +29,23 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.MaxCountRevFilter;
-import org.eclipse.jgit.storage.file.FileBasedConfig;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
-import org.eclipse.jgit.util.FS;
-import org.eclipse.jgit.util.SystemReader;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
-import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -72,8 +64,6 @@ public class GitLookup implements AutoCloseable {
     public static final String COPYRIGHT_LAST_YEAR_SOURCE_KEY = "license.git.copyrightLastYearSource";
     public static final String COPYRIGHT_LAST_YEAR_TIME_ZONE_KEY = "license.git.copyrightLastYearTimeZone";
     public static final String COMMITS_TO_IGNORE_KEY = "license.git.commitsToIgnore";
-
-    private static final boolean DEBUG = false;
 
     public enum DateSource {
         AUTHOR, COMMITER
@@ -203,21 +193,19 @@ public class GitLookup implements AutoCloseable {
             return getCurrentYear();
         }
 
-        return timed("getYearOfLastChange", () -> {
-            int commitYear = 0;
-            RevWalk walk = getGitRevWalk(repoRelativePath, false);
-            for (RevCommit commit : walk) {
-                if (commitsToIgnore.contains(commit.getId())) {
-                    continue;
-                }
-                int y = getYearFromCommit(commit);
-                if (y > commitYear) {
-                    commitYear = y;
-                }
+        int commitYear = 0;
+        RevWalk walk = getGitRevWalk(repoRelativePath, false);
+        for (RevCommit commit : walk) {
+            if (commitsToIgnore.contains(commit.getId())) {
+                continue;
             }
-            walk.dispose();
-            return commitYear;
-        });
+            int y = getYearFromCommit(commit);
+            if (y > commitYear) {
+                commitYear = y;
+            }
+        }
+        walk.dispose();
+        return commitYear;
     }
 
     /**
@@ -230,55 +218,49 @@ public class GitLookup implements AutoCloseable {
     int getYearOfCreation(File file) throws IOException {
         String repoRelativePath = pathResolver.relativize(file);
 
-        return timed("getYearOfCreation", () -> {
-            int commitYear = 0;
-            RevWalk walk = getGitRevWalk(repoRelativePath, true);
-            Iterator<RevCommit> iterator = walk.iterator();
-            if (iterator.hasNext()) {
-                RevCommit commit = iterator.next();
-                commitYear = getYearFromCommit(commit);
-            }
-            walk.dispose();
+        int commitYear = 0;
+        RevWalk walk = getGitRevWalk(repoRelativePath, true);
+        Iterator<RevCommit> iterator = walk.iterator();
+        if (iterator.hasNext()) {
+            RevCommit commit = iterator.next();
+            commitYear = getYearFromCommit(commit);
+        }
+        walk.dispose();
 
-            // If we couldn't find a creation year from Git assume newly created file
-            if (commitYear == 0) {
-                return getCurrentYear();
-            }
+        // If we couldn't find a creation year from Git assume newly created file
+        if (commitYear == 0) {
+            return getCurrentYear();
+        }
 
-            return commitYear;
-        });
+        return commitYear;
     }
 
     String getAuthorNameOfCreation(File file) throws IOException {
         String repoRelativePath = pathResolver.relativize(file);
 
-        return timed("getAuthorNameOfCreation", () -> {
-            String authorName = "";
-            RevWalk walk = getGitRevWalk(repoRelativePath, true);
-            Iterator<RevCommit> iterator = walk.iterator();
-            if (iterator.hasNext()) {
-                RevCommit commit = iterator.next();
-                authorName = getAuthorNameFromCommit(commit);
-            }
-            walk.dispose();
-            return authorName;
-        });
+        String authorName = "";
+        RevWalk walk = getGitRevWalk(repoRelativePath, true);
+        Iterator<RevCommit> iterator = walk.iterator();
+        if (iterator.hasNext()) {
+            RevCommit commit = iterator.next();
+            authorName = getAuthorNameFromCommit(commit);
+        }
+        walk.dispose();
+        return authorName;
     }
 
     String getAuthorEmailOfCreation(File file) throws IOException {
         String repoRelativePath = pathResolver.relativize(file);
 
-        return timed("getAuthorEmailOfCreation", () -> {
-            String authorEmail = "";
-            RevWalk walk = getGitRevWalk(repoRelativePath, true);
-            Iterator<RevCommit> iterator = walk.iterator();
-            if (iterator.hasNext()) {
-                RevCommit commit = iterator.next();
-                authorEmail = getAuthorEmailFromCommit(commit);
-            }
-            walk.dispose();
-            return authorEmail;
-        });
+        String authorEmail = "";
+        RevWalk walk = getGitRevWalk(repoRelativePath, true);
+        Iterator<RevCommit> iterator = walk.iterator();
+        if (iterator.hasNext()) {
+            RevCommit commit = iterator.next();
+            authorEmail = getAuthorEmailFromCommit(commit);
+        }
+        walk.dispose();
+        return authorEmail;
     }
 
     boolean isShallowRepository() {
@@ -349,46 +331,6 @@ public class GitLookup implements AutoCloseable {
     @Override
     public void close() {
         repository.close();
-        timedClose();
     }
 
-    static Map<String, List<Long>> collectTimed = new HashMap<>();
-
-    static <T> T timed(String title, Callable<T> doit) throws IOException {
-        if (!DEBUG) {
-            try {
-                return doit.call();
-            } catch (IOException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }
-
-        long now0 = System.currentTimeMillis();
-        try {
-            return doit.call();
-        } catch (IOException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        } finally {
-            long now = System.currentTimeMillis();
-            collectTimed.merge(title, List.of(now - now0), (a, b) -> {
-                var merged = new ArrayList<Long>(a);
-                merged.addAll(b);
-                return merged;
-            });
-        }
-    }
-
-    static void timedClose() {
-        collectTimed.forEach((title, timed) -> {
-            var total = timed.stream().mapToLong(v -> v).sum();
-            var average = (long) timed.stream().mapToLong(v -> v).average().orElse(-1);
-            System.out.println(String.format("timed %s: %d %dms, average %dms", title, timed.size(),
-                    total, average));
-        });
-        collectTimed.clear();
-    }
 }
